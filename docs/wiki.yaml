@@ -2,58 +2,184 @@ schema: mcp-wiki-export/v1
 home:
   document: home
 documents:
-- id: home
-  title: Home
-  source: generated:home
-  target: Home.md
-  platforms:
-  - github
-  - azure
-- id: functional
-  title: Functional Requirements
-  source: generated:functional
-  target: Functional-Requirements.md
-  platforms:
-  - github
-  - azure
-- id: technical
-  title: Technical Requirements
-  source: generated:technical
-  target: Technical-Requirements.md
-  platforms:
-  - github
-  - azure
-- id: testing
-  title: Testing Requirements
-  source: generated:testing
-  target: Testing-Requirements.md
-  platforms:
-  - github
-  - azure
-- id: mapping
-  title: TR per FR Mapping
-  source: generated:mapping
-  target: TR-per-FR-Mapping.md
-  platforms:
-  - github
-  - azure
-- id: matrix
-  title: Requirements Matrix
-  source: generated:matrix
-  target: Requirements-Matrix.md
-  platforms:
-  - github
-  - azure
+  - id: home
+    title: Home
+    source: generated:home
+    target: Home.md
+    platforms:
+      - github
+      - azure
+  - id: functional
+    title: Functional Requirements
+    source: generated:functional
+    target: Functional-Requirements.md
+    platforms:
+      - github
+      - azure
+  - id: technical
+    title: Technical Requirements
+    source: generated:technical
+    target: Technical-Requirements.md
+    platforms:
+      - github
+      - azure
+  - id: testing
+    title: Testing Requirements
+    source: generated:testing
+    target: Testing-Requirements.md
+    platforms:
+      - github
+      - azure
+  - id: mapping
+    title: TR per FR Mapping
+    source: generated:mapping
+    target: TR-per-FR-Mapping.md
+    platforms:
+      - github
+      - azure
+  - id: matrix
+    title: Requirements Matrix
+    source: generated:matrix
+    target: Requirements-Matrix.md
+    platforms:
+      - github
+      - azure
+  - id: project-overview
+    title: Project Overview
+    source: README.md
+    target: Project-Overview.md
+    platforms:
+      - github
+      - azure
+  - id: combined-overview
+    title: Combined Archive
+    source: combined/README.md
+    target: Combined-Archive.md
+    platforms:
+      - github
+      - azure
+  - id: combined-assembly
+    title: Combined ca65 Sources
+    source: combined/asm/README.md
+    target: Combined-Assembly.md
+    platforms:
+      - github
+      - azure
+  - id: combined-errata
+    title: Combined Errata
+    source: combined/ERRATA.md
+    target: Combined-Errata.md
+    platforms:
+      - github
+      - azure
+  - id: combined-merge-report
+    title: Merge and Verification Report
+    source: combined/MERGE-REPORT.md
+    target: Combined-Merge-Report.md
+    platforms:
+      - github
+      - azure
+  - id: ml-data-structures
+    title: Machine-Language Data Structures
+    source: docs/ML-DATA-STRUCTURES.md
+    target: ML-Data-Structures.md
+    platforms:
+      - github
+      - azure
+  - id: activity-diagrams
+    title: Machine-Language Activity Diagrams
+    source: docs/Diagrams/README.md
+    target: Activity-Diagrams.md
+    platforms:
+      - github
+      - azure
+  - id: bp-activity-diagrams
+    title: BP.ML Activity Diagrams
+    source: docs/Diagrams/BP-ML-Activity-Diagrams.md
+    target: BP-ML-Activity-Diagrams.md
+    platforms:
+      - github
+      - azure
+  - id: cl-activity-diagrams
+    title: CL.ML Activity Diagrams
+    source: docs/Diagrams/CL-ML-Activity-Diagrams.md
+    target: CL-ML-Activity-Diagrams.md
+    platforms:
+      - github
+      - azure
+  - id: use-cases
+    title: Reverse-Engineered Use Cases
+    source: docs/Project/Use-Cases.md
+    target: Use-Cases.md
+    platforms:
+      - github
+      - azure
+  - id: gpt-assembly
+    title: GPT ca65 Reconstruction
+    source: gpt/asm/README.md
+    target: GPT-Assembly.md
+    platforms:
+      - github
+      - azure
+  - id: gpt-errata
+    title: GPT Listing Audit
+    source: gpt/Neural-Networks-C64-Errata.md
+    target: GPT-Errata.md
+    platforms:
+      - github
+      - azure
+  - id: gpt-verification
+    title: GPT Verification
+    source: gpt/VERIFICATION.md
+    target: GPT-Verification.md
+    platforms:
+      - github
+      - azure
+  - id: grok-assembly
+    title: Grok ca65 Reconstruction
+    source: grok/ca65/README.md
+    target: Grok-Assembly.md
+    platforms:
+      - github
+      - azure
+  - id: grok-errata
+    title: Grok Disk Errata
+    source: grok/Gazette_NN_D64_Errata.md
+    target: Grok-Errata.md
+    platforms:
+      - github
+      - azure
 navigation:
-- document: home
-  children: &o0 []
-- document: functional
-  children: *o0
-- document: technical
-  children: *o0
-- document: testing
-  children: *o0
-- document: mapping
-  children: *o0
-- document: matrix
-  children: *o0
+  - document: home
+  - title: Requirements
+    path: Requirements
+    children:
+      - document: functional
+      - document: technical
+      - document: testing
+      - document: mapping
+      - document: matrix
+      - document: use-cases
+  - title: Combined Archive
+    path: Combined-Archive
+    children:
+      - document: project-overview
+      - document: combined-overview
+      - document: combined-assembly
+      - document: combined-errata
+      - document: combined-merge-report
+  - title: Machine-Language Internals
+    path: Machine-Language-Internals
+    children:
+      - document: ml-data-structures
+      - document: activity-diagrams
+      - document: bp-activity-diagrams
+      - document: cl-activity-diagrams
+  - title: Source Audits
+    path: Source-Audits
+    children:
+      - document: gpt-assembly
+      - document: gpt-errata
+      - document: gpt-verification
+      - document: grok-assembly
+      - document: grok-errata
