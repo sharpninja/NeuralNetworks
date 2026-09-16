@@ -6,18 +6,19 @@ The diagrams are reconstructed from the disassembly and article-facing ABI. They
 
 ## Data structures and model
 
-The engine divides its state between C64 BASIC variables and arrays, a compact machine-language workspace, and transient ROM floating-point registers. The authoritative declarations are the [zero-page and workspace map](../../combined/asm/BP.ML.s#L23), the [BASIC DIM expression](../../combined/asm/BP.ML.s#L1893), and the [snapshot write order](../../combined/asm/BP.ML.s#L1539).
+The engine uses two distinct storage layers: the neural-network model is held in BASIC scalars and five-byte floating arrays, while fixed C64 RAM cells hold the machine-language address map and runtime state. The complete cross-engine reference is [BP.ML and CL.ML data structures](../ML-DATA-STRUCTURES.md). Source authority for BP.ML is the [workspace equate map](../../combined/asm/BP.ML.s#L23), [DIM expression](../../combined/asm/BP.ML.s#L1893), and [snapshot write order](../../combined/asm/BP.ML.s#L1539).
 
-BASIC stores every numeric scalar and array element as a five-byte floating-point value. DIM bounds are inclusive, so `O2(P2)` contains indices `0..P2` and `IN(P1,NP)` contains `(P1+1)*(NP+1)` elements. Active neurons and stored patterns begin at one. Index zero has defined purposes:
+### BASIC-resident network model
+
+DIM bounds are inclusive, so `O2(P2)` contains indices `0..P2` and `IN(P1,NP)` contains `(P1+1)*(NP+1)` elements. Active neurons and stored patterns begin at one. Index zero has defined purposes:
 
 - `IN(0,pattern)=1` supplies the input-layer bias, including scratch pattern zero.
-- `O2(0)=1` supplies the output layer's bias input. `O3(0)=1` initializes the output array's index-zero slot, but no later layer consumes it.
-- Pattern zero is the scratch column used by recognition.
+- `O2(0)=1` supplies the output layer's bias input.
+- `O3(0)=1` initializes the output array's index-zero slot, but no later layer consumes it.
+- Pattern zero is the recognition scratch column.
 - Weight and momentum arrays include zero-index storage because BASIC allocates every inclusive dimension.
 
-`IndexVector` advances five bytes per index. `IndexMatrix` treats the first declared subscript as the fast-changing coordinate and calculates `5*(secondIndex*(firstBound+1)+firstIndex)`.
-
-Cached scalar and array addresses are stored as 16-bit offsets relative to `BASIC_VARTAB` or `BASIC_ARYTAB`. A routine adds the current base address when it needs an absolute `ElementPtr`, which lets load operations recreate BASIC storage at a different address.
+`IndexVector` advances five bytes per index. `IndexMatrix` calculates `5*(secondIndex*(firstBound+1)+firstIndex)`, so the first declared subscript changes fastest.
 
 | Structure | Logical shape | Purpose | Saved |
 | --- | --- | --- | --- |
@@ -26,31 +27,71 @@ Cached scalar and array addresses are stored as 16-bit offsets relative to `BASI
 | `TE` | BASIC scalar | Total pre-update error accumulated during an epoch | No |
 | `IN(P1,NP)` | Input `0..P1` by pattern `0..NP` | Binary inputs; row zero is bias and column zero is recognition scratch | Yes |
 | `T(P3,NP)` | Output `0..P3` by pattern `0..NP` | Teacher vectors for supervised training | Yes |
-| `W1(P2,P1)` | Hidden `0..P2` by input `0..P1` | Input-to-hidden weights; input index zero is the hidden bias weight | Yes |
-| `M1(P2,P1)` | Same as W1 | Previous W1 changes used by momentum | Yes |
-| `O2(P2)` and `E2(P2)` | Hidden `0..P2` | Hidden activations and hidden deltas | No |
-| `W2(P3,P2)` | Output `0..P3` by hidden `0..P2` | Hidden-to-output weights; hidden index zero is the output bias weight | Yes |
-| `M2(P3,P2)` | Same as W2 | Previous W2 changes used by momentum | Yes |
-| `O3(P3)` and `E3(P3)` | Output `0..P3` | Output activations and output deltas | No |
-| `E(NP)` | Pattern `0..NP` | Half squared error for each pattern; index zero is recognition scratch | No |
-| ML workspace | Byte counts, indices, relative offsets, pointers, and five-byte scratch floats | Connects routines to BASIC storage and ROM floating-point operations | No |
+| `W1(P2,P1)` | Hidden `0..P2` by input `0..P1` | Input-to-hidden weights; input zero is the hidden bias weight | Yes |
+| `M1(P2,P1)` | Same as `W1` | Previous `W1` changes used by momentum | Yes |
+| `O2(P2)`, `E2(P2)` | Hidden `0..P2` | Hidden activations and hidden deltas | No |
+| `W2(P3,P2)` | Output `0..P3` by hidden `0..P2` | Hidden-to-output weights; hidden zero is the output bias weight | Yes |
+| `M2(P3,P2)` | Same as `W2` | Previous `W2` changes used by momentum | Yes |
+| `O3(P3)`, `E3(P3)` | Output `0..P3` | Output activations and output deltas | No |
+| `E(NP)` | Pattern `0..NP` | Half squared error for each pattern; index zero is scratch | No |
+
+### Machine-language workspace map
+
+After `MakeOffsetsRelative`, offsets are 16-bit little-endian displacements relative to `BASIC_VARTAB` for scalars or `BASIC_ARYTAB` for arrays. During initialization, the slots temporarily contain absolute lookup addresses. Pointers are absolute 16-bit addresses. This state is global, transient, and not serialized.
+
+| Address | Symbol | Representation | Maps or controls |
+| --- | --- | --- | --- |
+| `$02A7-$02A8` | `SavedTextPtr` | Absolute pointer | Saved BASIC parser position |
+| `$02A9` | `InputCount` | Unsigned byte | `P1` |
+| `$02AA` | `HiddenCount` | Unsigned byte | `P2` |
+| `$02AB` | `OutputCount` | Unsigned byte | `P3` |
+| `$02AC` | `PatternCount` | Unsigned byte | `NP` |
+| `$02AD-$02AE` | `RateOffset` | VARTAB-relative offset | `RA` |
+| `$02AF-$02B0` | `EpsilonOffset` | VARTAB-relative offset | `EP` |
+| `$02B1-$02B2` | `MomentumOffset` | VARTAB-relative offset | `MO` |
+| `$02B3-$02B4` | `O2Offset` | ARYTAB-relative offset | `O2(0)` |
+| `$02B5-$02B6` | `O3Offset` | ARYTAB-relative offset | `O3(0)` |
+| `$02B7-$02B8` | `E2Offset` | ARYTAB-relative offset | `E2(0)` |
+| `$02B9-$02BA` | `E3Offset` | ARYTAB-relative offset | `E3(0)` |
+| `$02BB` | `PatternIndex` | Unsigned byte | Selected pattern; zero is recognition scratch |
+| `$02BF-$02C0` | `W1Offset` | ARYTAB-relative offset | `W1(0,0)` |
+| `$02C1-$02C2` | `W2Offset` | ARYTAB-relative offset | `W2(0,0)` |
+| `$02C3-$02C4` | `M1Offset` | ARYTAB-relative offset | `M1(0,0)` |
+| `$02C5-$02C6` | `M2Offset` | ARYTAB-relative offset | `M2(0,0)` |
+| `$02C7-$02C8` | `TeacherOffset` | ARYTAB-relative offset | `T(0,0)` |
+| `$02C9-$02CA` | `InputOffset` | ARYTAB-relative offset | `IN(0,0)` |
+| `$02CB-$02CC` | `ErrorOffset` | ARYTAB-relative offset | `E(0)` |
+| `$02CD-$02D1` | `WorkFloat` | Five-byte float with two-byte overlay | Accumulation scratch; first two bytes can hold a temporary pointer |
+| `$02D2-$02D3` | `TotalErrorOffset` | VARTAB-relative offset | `TE` |
+| `$02D4-$02D5` | `TotalErrorPtr` | Absolute pointer | Resolved `TE` |
+| `$02D6-$02D7` | `EpsilonPtr` | Absolute pointer | Resolved `EP` |
+| `$02D8-$02DC` | `ErrorScratch` | Five-byte float | Teacher minus output before squaring |
+| `$02DD-$02F2` | `FilenameBuffer` | 22 bytes | Up to 20 filename bytes plus `,R` or `,W` |
+| `$0334-$0335` | `ElementPtr` | Absolute pointer | Selected five-byte array element |
+| `$0336` | `IndexI` | Unsigned byte | Outer loop index |
+| `$0338` | `IndexJ` | Unsigned byte | Inner loop index |
+| `$03FC` | `ShowError` | Boolean byte | Controls epoch error printing |
+| `$03FD` | `MatrixBound` | Unsigned byte | First matrix dimension upper bound |
+
+`$02BC-$02BE`, `$0337`, and `$0339` are gaps, not named BP.ML fields. The embedded DIM text, lookup strings, and floating constants are mapped in the [complete BP.ML reference](../ML-DATA-STRUCTURES.md#bpml-embedded-read-only-data).
+
+### Serialized model structure
+
+The save stream is `P1, P2, P3, NP, RA, MO, EP, W1, W2, M1, M2, IN, T`. It has no header, version, stored length, or checksum. Total size is `19 + 10*(P2+1)*(P1+1) + 10*(P3+1)*(P2+1) + 5*(P1+1)*(NP+1) + 5*(P3+1)*(NP+1)` bytes. The [complete layout](../ML-DATA-STRUCTURES.md#bpml-serialized-network-layout) identifies each relative field.
 
 ### Data model
 
 ```mermaid
 flowchart LR
-    CFG["Configuration<br/>P1, P2, P3, NP<br/>RA, MO, EP"] --> IN["Input store<br/>IN(input, pattern)<br/>bias row and scratch column"]
-    CFG --> T["Teacher store<br/>T(output, pattern)"]
-    CFG --> W1["Hidden parameters<br/>W1(hidden, input)<br/>M1(previous change)"]
-    CFG --> W2["Output parameters<br/>W2(output, hidden)<br/>M2(previous change)"]
-    IN --> H["Hidden runtime<br/>O2(hidden)<br/>E2(hidden)"]
-    W1 --> H
-    H --> O["Output runtime<br/>O3(output)<br/>E3(output)"]
-    W2 --> O
-    T --> ERR["Error state<br/>E(pattern)<br/>TE"]
-    O --> ERR
-    ERR --> W2
-    ERR --> W1
+    DIMS["ML dimension bytes<br/>InputCount HiddenCount<br/>OutputCount PatternCount"] --> CFG["BASIC scalars<br/>P1 P2 P3 NP<br/>RA MO EP TE"]
+    OFF["ML relative offsets<br/>RateOffset through ErrorOffset<br/>TotalErrorOffset"] --> ARR["BASIC arrays<br/>IN T W1 W2 M1 M2<br/>O2 O3 E2 E3 E"]
+    IDX["ML selection state<br/>PatternIndex IndexI IndexJ<br/>MatrixBound"] --> PTR["ML absolute pointer<br/>ElementPtr"]
+    OFF --> PTR
+    PTR --> ARR
+    SCR["ML floating scratch<br/>WorkFloat ErrorScratch<br/>FAC ARG"] --> ARR
+    IO["ML file state<br/>FilenameBuffer"] --> SNAP["Serialized model<br/>dimensions scalars<br/>weights momentum patterns"]
+    ARR --> SNAP
+    CFG --> SNAP
 ```
 
 Activity nodes identify data access directly. `Reads` names the exact structures inspected without modification, `Writes` names the exact structures created or changed, and `Data access: none` marks control-only entry, exit, and transfer nodes.
@@ -280,7 +321,7 @@ flowchart TD
     A(["InitializeNetwork entry<br/>Data access: none"]) --> B["Parse P1, P2, P3, and NP as byte-sized dimensions<br/>Reads: BASIC argument stream<br/>Writes: P1, P2, P3, NP"]
     B --> C["Resolve RA, MO, and EP BASIC scalar addresses<br/>Reads: BASIC_VARTAB and embedded RA, MO, EP names<br/>Writes: RateOffset, MomentumOffset, EpsilonOffset"]
     C --> D["Evaluate and store rate, momentum, and epsilon<br/>Reads: BASIC argument stream and RA, MO, EP offsets<br/>Writes: RA, MO, EP"]
-    D --> E["Fall through to CreateBasicStorage<br/>Reads: control flow only<br/>Writes: none"]
+    D --> E["Fall through to CreateBasicStorage<br/>Data access: none"]
     E --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -300,7 +341,7 @@ Source: [BP.ML.s lines 227-308](../../combined/asm/BP.ML.s#L227)
 flowchart TD
     A(["CreateBasicStorage entry<br/>Data access: none"]) --> B["Create P1, P2, P3, NP, and TE BASIC scalars<br/>Reads: InputCount, HiddenCount, OutputCount, PatternCount<br/>Writes: P1, P2, P3, NP, TE"]
     B --> C["Execute the embedded DIM expressions for eleven arrays<br/>Reads: P1, P2, P3, NP and DimExpressions<br/>Writes: O2, O3, E2, E3, W1, W2, M1, M2, T, IN, E"]
-    C --> D["Fall through to SetHiddenBias<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Fall through to SetHiddenBias<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -320,7 +361,7 @@ Source: [BP.ML.s lines 309-338](../../combined/asm/BP.ML.s#L309)
 flowchart TD
     A(["SetHiddenBias entry<br/>Data access: none"]) --> B["Set O2(0) to numeric one<br/>Reads: O2Offset and FloatOne<br/>Writes: O2(0)"]
     B --> C["Set O3(0) to numeric one<br/>Reads: O3Offset and FloatOne<br/>Writes: O3(0)"]
-    C --> D["Fall through to SetInputBiases<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Fall through to SetInputBiases<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -343,7 +384,7 @@ flowchart TD
     C -- Yes --> D["Store numeric one in IN(0, pattern)<br/>Reads: InputOffset, IndexI, FloatOne<br/>Writes: IN(0,IndexI)"]
     D --> E["Advance to the next pattern column<br/>Reads: IndexI<br/>Writes: IndexI"]
     E --> C
-    C -- No --> F["Continue at InitializeW1<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at InitializeW1<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -363,7 +404,7 @@ Source: [BP.ML.s lines 365-378](../../combined/asm/BP.ML.s#L365)
 flowchart TD
     A(["InitializeW1 entry<br/>Data access: none"]) --> B["Resolve the W1 BASIC array address<br/>Reads: BASIC_ARYTAB and embedded W1 name<br/>Writes: W1Offset and ElementPtr"]
     B --> C["Initialize matrix indices including allocated zero slots<br/>Reads: InputCount and HiddenCount<br/>Writes: IndexI and IndexJ"]
-    C --> D["Fall through to RandomizeW1Element<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Fall through to RandomizeW1Element<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -386,7 +427,7 @@ flowchart TD
     C -- Yes --> D["Generate 10 times RND(1) minus 5<br/>Reads: BASIC RND state<br/>Writes: FAC and WorkFloat"]
     D --> E["Store the random weight and advance indices<br/>Reads: FAC, ElementPtr, InputCount, HiddenCount<br/>Writes: W1, IndexI, IndexJ"]
     E --> C
-    C -- No --> F["Continue at InitializeW2<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at InitializeW2<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -409,7 +450,7 @@ flowchart TD
     C -- Yes --> D["Generate 10 times RND(1) minus 5<br/>Reads: BASIC RND state<br/>Writes: FAC and WorkFloat"]
     D --> E["Store the random weight and advance indices<br/>Reads: FAC, ElementPtr, HiddenCount, OutputCount<br/>Writes: W2, IndexI, IndexJ"]
     E --> C
-    C -- No --> F["Continue at FindRemainingArrays<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at FindRemainingArrays<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -429,7 +470,7 @@ Source: [BP.ML.s lines 458-501](../../combined/asm/BP.ML.s#L458)
 flowchart TD
     A(["FindRemainingArrays entry<br/>Data access: none"]) --> B["Resolve E, T, M1, and M2 BASIC array addresses<br/>Reads: BASIC_ARYTAB and embedded array names<br/>Writes: ErrorOffset, TeacherOffset, M1Offset, M2Offset"]
     B --> C["Cache each absolute array pointer<br/>Reads: BASIC array addresses<br/>Writes: E, T, M1, M2 absolute pointers"]
-    C --> D["Fall through to MakeOffsetsRelative<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Fall through to MakeOffsetsRelative<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -492,7 +533,7 @@ flowchart TD
     A(["SelectStoredPattern entry<br/>Data access: none"]) --> B["Parse a stored pattern number<br/>Reads: BASIC numeric argument and PatternCount<br/>Writes: PatternIndex"]
     B --> C{"Pattern number is in 1 through NP?<br/>Reads: parsed pattern number and PatternCount<br/>Writes: none"}
     C -- Yes --> D["Set PatternIndex and enter ForwardPass<br/>Reads: parsed pattern number<br/>Writes: PatternIndex"]
-    C -- No --> E["Raise BASIC illegal quantity error<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> E["Raise BASIC illegal quantity error<br/>Data access: none"]
     D --> Z(["Continue<br/>Data access: none"])
     E --> X(["BASIC error<br/>Data access: none"])
 ```
@@ -512,7 +553,7 @@ Source: [BP.ML.s lines 636-639](../../combined/asm/BP.ML.s#L636)
 ```mermaid
 flowchart TD
     A(["ForwardPass entry<br/>Data access: none"]) --> B["Initialize hidden-neuron iteration<br/>Reads: none<br/>Writes: IndexI"]
-    B --> C["Fall through to HiddenNeuron<br/>Reads: control flow only<br/>Writes: none"]
+    B --> C["Fall through to HiddenNeuron<br/>Data access: none"]
     C --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -535,7 +576,7 @@ flowchart TD
     C -- Yes --> D["Load W1(hidden,input) and IN(input,pattern)<br/>Reads: W1(IndexI,IndexJ) and IN(IndexJ,PatternIndex)<br/>Writes: FAC"]
     D --> E["Accumulate their product<br/>Reads: FAC and WorkFloat<br/>Writes: FAC"]
     E --> C
-    C -- No --> F["Continue at HiddenSigmoid<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at HiddenSigmoid<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -555,7 +596,7 @@ Source: [BP.ML.s lines 684-715](../../combined/asm/BP.ML.s#L684)
 flowchart TD
     A(["HiddenSigmoid entry<br/>Data access: none"]) --> B["Compute one divided by one plus exp of negative sum<br/>Reads: FAC<br/>Writes: FAC"]
     B --> C["Store O2(hidden)<br/>Reads: FAC and IndexI<br/>Writes: O2(IndexI)"]
-    C --> D["Process another hidden neuron or continue to OutputLayer<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Process another hidden neuron or continue to OutputLayer<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -579,7 +620,7 @@ flowchart TD
     D --> E["Accumulate the product<br/>Reads: FAC and WorkFloat<br/>Writes: FAC"]
     E --> C
     C -- No --> F["Apply sigmoid and store O3(output)<br/>Reads: FAC and IndexI<br/>Writes: O3(IndexI)"]
-    F --> G["Process another output or continue to PatternSquaredError<br/>Reads: control flow only<br/>Writes: none"]
+    F --> G["Process another output or continue to PatternSquaredError<br/>Data access: none"]
     G --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -663,7 +704,7 @@ Source: [BP.ML.s lines 920-939](../../combined/asm/BP.ML.s#L920)
 flowchart TD
     A(["PrintFloat entry<br/>Data access: none"]) --> B["Format FAC into the BASIC print buffer<br/>Reads: FAC<br/>Writes: BASIC_PRINT_BUFFER"]
     B --> C["Print the resulting BASIC string<br/>Reads: BASIC_PRINT_BUFFER<br/>Writes: screen output"]
-    C --> D["Return<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Return<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -704,7 +745,7 @@ Source: [BP.ML.s lines 946-948](../../combined/asm/BP.ML.s#L946)
 ```mermaid
 flowchart TD
     A(["TrainCurrentPattern entry<br/>Data access: none"]) --> B["Run ForwardPass for the already selected PatternIndex<br/>Reads: PatternIndex, IN, W1, W2, T<br/>Writes: O2, O3, E(PatternIndex)"]
-    B --> C["Fall through to OutputDeltaLoop<br/>Reads: control flow only<br/>Writes: none"]
+    B --> C["Fall through to OutputDeltaLoop<br/>Data access: none"]
     C --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -727,7 +768,7 @@ flowchart TD
     C -- Yes --> D["Compute E3 as teacher minus output times output times one minus output<br/>Reads: T(IndexI,PatternIndex) and O3(IndexI)<br/>Writes: E3(IndexI)"]
     D --> E["Store E3 and advance output index<br/>Reads: FAC and IndexI<br/>Writes: E3(IndexI) and IndexI"]
     E --> C
-    C -- No --> F["Continue at UpdateW2<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at UpdateW2<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -751,7 +792,7 @@ flowchart TD
     D --> E["Store M2 and add it to W2<br/>Reads: FAC, M2(IndexI,IndexJ), W2(IndexI,IndexJ)<br/>Writes: M2(IndexI,IndexJ) and W2(IndexI,IndexJ)"]
     E --> F["Advance hidden and output indices<br/>Reads: IndexI, IndexJ, HiddenCount, OutputCount<br/>Writes: IndexI and IndexJ"]
     F --> C
-    C -- No --> G["Continue at HiddenDeltaLoop<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> G["Continue at HiddenDeltaLoop<br/>Data access: none"]
     G --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -776,7 +817,7 @@ flowchart TD
     E --> C
     C -- No --> F["Multiply by O2 times one minus O2<br/>Reads: O2(IndexI), FAC, and WorkFloat<br/>Writes: FAC"]
     F --> G["Store E2(hidden) and process the next hidden neuron<br/>Reads: FAC and IndexI<br/>Writes: E2(IndexI) and IndexI"]
-    G --> H["Continue at UpdateW1<br/>Reads: control flow only<br/>Writes: none"]
+    G --> H["Continue at UpdateW1<br/>Data access: none"]
     H --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -845,7 +886,7 @@ Source: [BP.ML.s lines 1342-1353](../../combined/asm/BP.ML.s#L1342)
 flowchart TD
     A(["LearnUntilTolerance entry<br/>Data access: none"]) --> B["Parse the show-error flag<br/>Reads: BASIC numeric argument<br/>Writes: ShowError"]
     B --> C["Cache the epsilon scalar address<br/>Reads: EpsilonOffset and BASIC_VARTAB<br/>Writes: EpsilonPtr and TotalErrorPtr"]
-    C --> D["Fall through to LearningPass<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Fall through to LearningPass<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -865,7 +906,7 @@ Source: [BP.ML.s lines 1354-1383](../../combined/asm/BP.ML.s#L1354)
 flowchart TD
     A(["LearningPass entry<br/>Data access: none"]) --> B["Run TrainEpoch<br/>Reads: PatternCount, IN, T, W1, W2, M1, M2, RA, MO<br/>Writes: W1, W2, M1, M2, E, TE"]
     B --> C{"RUN/STOP is pressed?<br/>Reads: KERNAL RUN/STOP state<br/>Writes: none"}
-    C -- Yes --> X["Transfer to BASIC break handling<br/>Reads: control flow only<br/>Writes: none"]
+    C -- Yes --> X["Transfer to BASIC break handling<br/>Data access: none"]
     C -- No --> D["Optionally print TE when requested<br/>Reads: TE and ShowError<br/>Writes: screen output"]
     D --> E{"TE is greater than epsilon?<br/>Reads: TE and EP<br/>Writes: none"}
     E -- Yes --> F["Repeat LearningPass<br/>Reads: TE and EP<br/>Writes: none"]
@@ -892,7 +933,7 @@ flowchart TD
     A(["DefineTrainingPair entry<br/>Data access: none"]) --> B["Parse the stored pattern number<br/>Reads: BASIC numeric argument and PatternCount<br/>Writes: PatternIndex"]
     B --> C{"Pattern number is in 1 through NP?<br/>Reads: parsed pattern number and PatternCount<br/>Writes: none"}
     C -- Yes --> D["Set PatternIndex and enter ReadInputString<br/>Reads: parsed pattern number<br/>Writes: PatternIndex"]
-    C -- No --> E["Raise BASIC illegal quantity error<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> E["Raise BASIC illegal quantity error<br/>Data access: none"]
     D --> Z(["Continue<br/>Data access: none"])
     E --> X(["BASIC error<br/>Data access: none"])
 ```
@@ -917,7 +958,7 @@ flowchart TD
     D -- Yes --> E["Convert ASCII 1 to numeric one and every other character to zero<br/>Reads: BASIC string data byte<br/>Writes: FAC"]
     E --> F["Store IN(input,PatternIndex)<br/>Reads: FAC, PatternIndex, IndexI<br/>Writes: IN(IndexI,PatternIndex)"]
     F --> D
-    D -- No --> G["Continue at ReadTeacherString<br/>Reads: control flow only<br/>Writes: none"]
+    D -- No --> G["Continue at ReadTeacherString<br/>Data access: none"]
     G --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -941,7 +982,7 @@ flowchart TD
     D -- Yes --> E["Convert ASCII 1 to numeric one and every other character to zero<br/>Reads: BASIC string data byte<br/>Writes: FAC"]
     E --> F["Store T(output,PatternIndex)<br/>Reads: FAC, PatternIndex, IndexI<br/>Writes: T(IndexI,PatternIndex)"]
     F --> D
-    D -- No --> G["Return; raise illegal quantity on a length mismatch<br/>Reads: control flow only<br/>Writes: none"]
+    D -- No --> G["Return; raise illegal quantity on a length mismatch<br/>Data access: none"]
     G --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -964,8 +1005,8 @@ flowchart TD
     A(["SaveNetwork entry<br/>Data access: none"]) --> B["Open the device-8 status channel<br/>Reads: FilenameBuffer and KERNAL device configuration<br/>Writes: KERNAL status channel 15"]
     B --> C["Parse the filename and append comma-W<br/>Reads: BASIC filename string<br/>Writes: FilenameBuffer"] --> D["Open logical file 1 for writing<br/>Reads: FilenameBuffer and KERNAL device configuration<br/>Writes: KERNAL file 1 output channel"]
     D --> E{"Drive status reports an error?<br/>Reads: drive status stream<br/>Writes: none"}
-    E -- No --> F["Continue at WriteNetworkBody<br/>Reads: control flow only<br/>Writes: none"] --> Z(["Continue<br/>Data access: none"])
-    E -- Yes --> X["Enter DiskError<br/>Reads: control flow only<br/>Writes: none"] --> Y(["Error exit<br/>Data access: none"])
+    E -- No --> F["Continue at WriteNetworkBody<br/>Data access: none"] --> Z(["Continue<br/>Data access: none"])
+    E -- Yes --> X["Enter DiskError<br/>Data access: none"] --> Y(["Error exit<br/>Data access: none"])
 ```
 
 ### `WriteNetworkBody`
@@ -986,7 +1027,7 @@ flowchart TD
     B --> C["Write P1, P2, P3, and NP bytes<br/>Reads: P1, P2, P3, NP<br/>Writes: snapshot stream"]
     C --> D["Write RA, MO, and EP scalars<br/>Reads: RA, MO, EP and scalar offsets<br/>Writes: snapshot stream"]
     D --> E["Write W1, W2, M1, M2, IN, and T matrices<br/>Reads: W1, W2, M1, M2, IN, T<br/>Writes: snapshot stream"]
-    E --> F["Tail-call CloseNetworkFiles<br/>Reads: control flow only<br/>Writes: none"]
+    E --> F["Tail-call CloseNetworkFiles<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -1009,7 +1050,7 @@ flowchart TD
     C -- Yes --> D["Write the next stored floating-point byte<br/>Reads: BASIC scalar byte at BASIC_INDEX+IndexI<br/>Writes: snapshot stream"]
     D --> E["Advance the byte index<br/>Reads: IndexI<br/>Writes: IndexI"]
     E --> C
-    C -- No --> F["Return<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Return<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -1032,7 +1073,7 @@ flowchart TD
     C -- Yes --> D["Write the next byte through CHROUT<br/>Reads: matrix byte at BASIC_INDEX<br/>Writes: snapshot stream"]
     D --> E["Advance byte, element, and dimension counters<br/>Reads: IndexI, IndexJ, MatrixBound<br/>Writes: IndexI, IndexJ, BASIC_INDEX"]
     E --> C
-    C -- No --> F["Return<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Return<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -1076,8 +1117,8 @@ flowchart TD
     A(["LoadNetwork entry<br/>Data access: none"]) --> B["Open the device-8 status channel<br/>Reads: FilenameBuffer and KERNAL device configuration<br/>Writes: KERNAL status channel 15"]
     B --> C["Parse the filename and append comma-R<br/>Reads: BASIC filename string<br/>Writes: FilenameBuffer"] --> D["Open logical file 1 for reading<br/>Reads: FilenameBuffer and KERNAL device configuration<br/>Writes: KERNAL file 1 input channel"]
     D --> E{"Drive status reports an error?<br/>Reads: drive status stream<br/>Writes: none"}
-    E -- Yes --> X["Enter DiskError<br/>Reads: control flow only<br/>Writes: none"] --> Y(["Error exit<br/>Data access: none"])
-    E -- No --> F["Read P1, P2, P3, and NP<br/>Reads: snapshot stream<br/>Writes: P1, P2, P3, NP"] --> G["Recreate BASIC storage<br/>Reads: loaded P1, P2, P3, NP and BASIC memory boundaries<br/>Writes: BP BASIC scalars, arrays, biases, and cached offsets"] --> H["Read RA, MO, EP and all persisted matrices<br/>Reads: snapshot stream<br/>Writes: RA, MO, EP, W1, W2, M1, M2, IN, T"] --> I["Tail-call CloseNetworkFiles<br/>Reads: control flow only<br/>Writes: none"] --> Z(["Close and return<br/>Data access: none"])
+    E -- Yes --> X["Enter DiskError<br/>Data access: none"] --> Y(["Error exit<br/>Data access: none"])
+    E -- No --> F["Read P1, P2, P3, and NP<br/>Reads: snapshot stream<br/>Writes: P1, P2, P3, NP"] --> G["Recreate BASIC storage<br/>Reads: loaded P1, P2, P3, NP and BASIC memory boundaries<br/>Writes: BP BASIC scalars, arrays, biases, and cached offsets"] --> H["Read RA, MO, EP and all persisted matrices<br/>Reads: snapshot stream<br/>Writes: RA, MO, EP, W1, W2, M1, M2, IN, T"] --> I["Tail-call CloseNetworkFiles<br/>Data access: none"] --> Z(["Close and return<br/>Data access: none"])
 ```
 
 ### `ReadScalar`
@@ -1099,7 +1140,7 @@ flowchart TD
     C -- Yes --> D["Read the next byte through CHRIN<br/>Reads: snapshot stream<br/>Writes: input byte"]
     D --> E["Store it and advance the byte index<br/>Reads: IndexI<br/>Writes: IndexI"]
     E --> C
-    C -- No --> F["Return<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Return<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -1122,7 +1163,7 @@ flowchart TD
     C -- Yes --> D["Read and store the next byte<br/>Reads: snapshot stream and BASIC_INDEX<br/>Writes: matrix byte at BASIC_INDEX"]
     D --> E["Advance byte, element, and dimension counters<br/>Reads: IndexI, IndexJ, MatrixBound<br/>Writes: IndexI, IndexJ, BASIC_INDEX"]
     E --> C
-    C -- No --> F["Return<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Return<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -1143,7 +1184,7 @@ flowchart TD
     A(["RecreateForLoad entry<br/>Data access: none"]) --> B["Reset BASIC array and string boundaries<br/>Reads: BASIC_STREND and BASIC_MEMSIZ<br/>Writes: BASIC_STREND and BASIC_FRETOP"]
     B --> C["Recreate dimension scalars from the loaded byte values<br/>Reads: P1, P2, P3, NP loaded bytes<br/>Writes: P1, P2, P3, NP BASIC scalars"]
     C --> D["Call CreateBasicStorage to DIM arrays and rebuild offsets<br/>Reads: P1, P2, P3, NP<br/>Writes: BP BASIC arrays and cached offsets"]
-    D --> E["Return<br/>Reads: control flow only<br/>Writes: none"]
+    D --> E["Return<br/>Data access: none"]
     E --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -1164,7 +1205,7 @@ flowchart TD
     A(["OpenStatusChannel entry<br/>Data access: none"]) --> B["Set an empty filename<br/>Reads: none<br/>Writes: FilenameBuffer length"]
     B --> C["Configure logical file 15, device 8, secondary address 15<br/>Reads: device and secondary-address constants<br/>Writes: KERNAL logical-file configuration"]
     C --> D["Open the drive status channel<br/>Reads: KERNAL logical-file configuration<br/>Writes: KERNAL status channel 15"]
-    D --> E["Return<br/>Reads: control flow only<br/>Writes: none"]
+    D --> E["Return<br/>Data access: none"]
     E --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -1185,7 +1226,7 @@ flowchart TD
     A(["CloseNetworkFiles entry<br/>Data access: none"]) --> B["Restore default I/O channels<br/>Reads: KERNAL channel state<br/>Writes: default KERNAL channels"]
     B --> C["Close logical file 1<br/>Reads: KERNAL file table<br/>Writes: closed logical file 1"]
     C --> D["Close status file 15<br/>Reads: KERNAL file table<br/>Writes: closed logical file 15"]
-    D --> E["Return<br/>Reads: control flow only<br/>Writes: none"]
+    D --> E["Return<br/>Data access: none"]
     E --> Z(["Exit or continue<br/>Data access: none"])
 ```
 

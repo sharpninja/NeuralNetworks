@@ -50,6 +50,7 @@ The combined code is traced into durable MCP requirements and draft use cases:
 - [Traceability matrix](docs/Project/Requirements-Matrix.md)
 - [Use cases](docs/Project/Use-Cases.md)
 - [Mermaid activity diagrams for all 93 ML functions](docs/Diagrams/README.md)
+- [Machine-language data structures, workspace maps, and serialized layouts](docs/ML-DATA-STRUCTURES.md)
 
 All requirement acceptance criteria remain unsatisfied and all use cases remain Draft until the full C64 integration regression is run and reviewed.
 

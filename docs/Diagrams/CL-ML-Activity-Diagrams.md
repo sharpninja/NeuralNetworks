@@ -6,44 +6,76 @@ The diagrams are reconstructed from the disassembly and article-facing ABI. They
 
 ## Data structures and model
 
-The competitive-learning engine uses C64 BASIC arrays for persistent model and pattern data, plus a small machine-language workspace for classification and training control. The authoritative declarations are the [zero-page and workspace map](../../combined/asm/CL.ML.s#L23), the [BASIC DIM expression](../../combined/asm/CL.ML.s#L1252), and the [snapshot write order](../../combined/asm/CL.ML.s#L984).
+The competitive-learning model is stored in BASIC scalars and five-byte floating arrays. Fixed C64 RAM cells hold the machine-language address map, winner state, training order, counters, and scratch values. The complete cross-engine reference is [BP.ML and CL.ML data structures](../ML-DATA-STRUCTURES.md). Source authority for CL.ML is the [workspace equate map](../../combined/asm/CL.ML.s#L23), [DIM expression](../../combined/asm/CL.ML.s#L1252), and [snapshot write order](../../combined/asm/CL.ML.s#L984).
 
-BASIC numeric values occupy five bytes and DIM bounds are inclusive. Active inputs, clusters, and stored patterns begin at one. Index zero is used as working storage:
+### BASIC-resident network model
+
+DIM bounds are inclusive. Active inputs, clusters, and stored patterns begin at one. Index zero is working storage:
 
 - `IN(0,pattern)` stores the number of active input bits used to normalize learning targets.
-- Pattern zero is the scratch column used by recognition, including its active-input count.
-- `W1(0,0)` is reused as the random-weight sum while each cluster is initialized; active cluster weights use cluster indices `1..P2` and input indices `1..P1`.
-- `O2(0)` is allocated and initialized, while classification returns its one-hot winner in `O2(1..P2)`.
+- Pattern zero is the recognition scratch column, including its active-input count.
+- `W1(0,0)` is the random-weight sum scratch during cluster initialization.
+- Active cluster weights use cluster indices `1..P2` and input indices `1..P1`.
+- `O2(0)` is allocated and initialized; classification returns a one-hot winner in `O2(1..P2)`.
 
-`IndexVector` advances five bytes per index. `IndexMatrix` treats the first declared subscript as the fast-changing coordinate and calculates `5*(secondIndex*(firstBound+1)+firstIndex)`.
-
-Cached scalar and array addresses are stored as 16-bit offsets relative to `BASIC_VARTAB` or `BASIC_ARYTAB`. Routines add the current base address to form `ElementPtr`, so the loader can rebuild BASIC arrays before restoring saved data.
+`IndexVector` advances five bytes per index. `IndexMatrix` calculates `5*(secondIndex*(firstBound+1)+firstIndex)`, so the first declared subscript changes fastest.
 
 | Structure | Logical shape | Purpose | Saved |
 | --- | --- | --- | --- |
 | `P1`, `P2`, `NP` | Three BASIC scalars plus byte copies | Input, cluster, and stored-pattern counts | Yes |
 | `RA` | BASIC scalar | Competitive-learning rate | Yes |
 | `IN(P1,NP)` | Input `0..P1` by pattern `0..NP` | Binary patterns; row zero stores active counts and column zero is recognition scratch | Yes |
-| `W1(P2,P1)` | Cluster `0..P2` by input `0..P1` | Normalized cluster prototype weights; `W1(0,0)` is initialization scratch | Yes |
-| `O2(P2)` | Cluster `0..P2` | Temporary activations during selection, then one-hot classification output | No |
+| `W1(P2,P1)` | Cluster `0..P2` by input `0..P1` | Normalized cluster prototypes; `W1(0,0)` is initialization scratch | Yes |
+| `O2(P2)` | Cluster `0..P2` | Temporary activations, then one-hot classification output | No |
 | `PAT(NP)` | Pattern `0..NP` | In-place shuffled presentation order for one training epoch | No |
-| ML workspace | `PatternIndex`, `Winner`, `OrderIndex`, trial counter, offsets, pointers, indices, and floating scratch | Controls recognition, shuffling, winner selection, updates, and BASIC storage access | No |
+
+### Machine-language workspace map
+
+After `MakeOffsetsRelative`, offsets are 16-bit little-endian displacements relative to `BASIC_VARTAB` for scalars or `BASIC_ARYTAB` for arrays. During initialization, the slots temporarily contain absolute lookup addresses. Pointers are absolute 16-bit addresses. This state is global, transient, and not serialized.
+
+| Address | Symbol | Representation | Maps or controls |
+| --- | --- | --- | --- |
+| `$02A7-$02A8` | `SavedTextPtr` | Absolute pointer | Saved BASIC parser position |
+| `$02A9` | `InputCount` | Unsigned byte | `P1` |
+| `$02AA` | `OutputCount` | Unsigned byte | Cluster count `P2` |
+| `$02AC` | `PatternCount` | Unsigned byte | `NP` |
+| `$02AD-$02AE` | `RateOffset` | VARTAB-relative offset | `RA` |
+| `$02B3-$02B4` | `O2Offset` | ARYTAB-relative offset | `O2(0)` |
+| `$02BB` | `PatternIndex` | Unsigned byte | Selected pattern; zero is recognition scratch |
+| `$02BF-$02C0` | `W1Offset` | ARYTAB-relative offset | `W1(0,0)` |
+| `$02C1-$02C2` | `InputOffset` | ARYTAB-relative offset | `IN(0,0)` |
+| `$02C3-$02C4` | `OrderOffset` | ARYTAB-relative offset | `PAT(0)` |
+| `$02C5` | `Winner` | Unsigned byte | Current winning cluster |
+| `$02C6` | `OrderIndex` | Unsigned byte | Position in shuffled `PAT` |
+| `$02C7-$02C8` | `TrialsRemaining` | Little-endian 16-bit counter | Requested training passes |
+| `$02CD-$02D1` | `WorkFloat` | Five-byte float with two-byte overlay | Dot-product, comparison, normalization, and update scratch |
+| `$02DD-$02F2` | `FilenameBuffer` | 22 bytes | Up to 20 filename bytes plus `,R` or `,W` |
+| `$0334-$0335` | `ElementPtr` | Absolute pointer | Selected five-byte array element |
+| `$0336` | `IndexI` | Unsigned byte | Outer cluster, pattern, input, or I/O index |
+| `$0338` | `IndexJ` | Unsigned byte | Inner array or input index |
+| `$03FD` | `MatrixBound` | Unsigned byte | First matrix dimension upper bound |
+
+The preserved `TrialsRemaining` decrement logic runs counts above 255 with a nonzero low byte 256 passes short. Addresses omitted from the table are not named CL.ML fields. The gaps are listed in the [complete CL.ML workspace reference](../ML-DATA-STRUCTURES.md#clml-machine-language-workspace). The embedded DIM text, lookup strings, and unused constants are also [mapped by payload address](../ML-DATA-STRUCTURES.md#clml-embedded-read-only-data).
+
+### Serialized model structure
+
+The save stream is `P1, P2, NP, RA, W1, IN`. It has no header, version, stored length, or checksum. Total size is `8 + 5*(P2+1)*(P1+1) + 5*(P1+1)*(NP+1)` bytes. `O2` and `PAT` are rebuilt runtime state. The [complete layout](../ML-DATA-STRUCTURES.md#clml-serialized-network-layout) identifies each relative field.
 
 ### Data model
 
 ```mermaid
 flowchart LR
-    CFG["Configuration<br/>P1, P2, NP<br/>RA"] --> IN["Pattern store<br/>IN(input, pattern)<br/>active counts and scratch column"]
-    CFG --> W1["Cluster model<br/>W1(cluster, input)<br/>normalized prototypes"]
-    CFG --> PAT["Presentation order<br/>PAT(pattern)"]
-    PAT --> IN
-    IN --> SEL["Classification state<br/>cluster activation<br/>Winner"]
-    W1 --> SEL
-    SEL --> O2["Result<br/>one-hot O2(cluster)"]
-    SEL --> UPD["Winner-only update"]
-    IN --> UPD
-    CFG --> UPD
-    UPD --> W1
+    DIMS["ML dimension bytes<br/>InputCount OutputCount<br/>PatternCount"] --> CFG["BASIC scalars<br/>P1 P2 NP RA"]
+    OFF["ML relative offsets<br/>RateOffset O2Offset<br/>W1Offset InputOffset OrderOffset"] --> ARR["BASIC arrays<br/>IN W1 O2 PAT"]
+    SEL["ML selection state<br/>PatternIndex Winner<br/>OrderIndex"] --> IDX["ML loop state<br/>IndexI IndexJ<br/>MatrixBound"]
+    IDX --> PTR["ML absolute pointer<br/>ElementPtr"]
+    OFF --> PTR
+    PTR --> ARR
+    SCR["ML floating scratch<br/>WorkFloat FAC ARG"] --> ARR
+    TRIAL["ML trial counter<br/>TrialsRemaining"] --> ARR
+    IO["ML file state<br/>FilenameBuffer"] --> SNAP["Serialized model<br/>dimensions rate<br/>W1 IN"]
+    ARR --> SNAP
+    CFG --> SNAP
 ```
 
 Activity nodes identify data access directly. `Reads` names the exact structures inspected without modification, `Writes` names the exact structures created or changed, and `Data access: none` marks control-only entry, exit, and transfer nodes.
@@ -113,7 +145,7 @@ Source: [CL.ML.s lines 107-113](../../combined/asm/CL.ML.s#L107)
 
 ```mermaid
 flowchart TD
-    A(["Compatibility slot; no DIPOLE call site<br/>Data access: none"]) --> B["Execute two NOP instructions<br/>Reads: control flow only<br/>Writes: none"]
+    A(["Compatibility slot; no DIPOLE call site<br/>Data access: none"]) --> B["Execute two NOP instructions<br/>Data access: none"]
     B --> C(["Return without changing network state<br/>Data access: none"])
 ```
 
@@ -131,7 +163,7 @@ Source: [CL.ML.s lines 114-120](../../combined/asm/CL.ML.s#L114)
 
 ```mermaid
 flowchart TD
-    A(["Compatibility slot; no DIPOLE call site<br/>Data access: none"]) --> B["Execute two NOP instructions<br/>Reads: control flow only<br/>Writes: none"]
+    A(["Compatibility slot; no DIPOLE call site<br/>Data access: none"]) --> B["Execute two NOP instructions<br/>Data access: none"]
     B --> C(["Return without changing network state<br/>Data access: none"])
 ```
 
@@ -257,7 +289,7 @@ flowchart TD
     A(["InitializeNetwork entry<br/>Data access: none"]) --> B["Parse P1, P2, and NP as byte-sized dimensions<br/>Reads: BASIC argument stream<br/>Writes: P1, P2, NP"]
     B --> C["Resolve the RA BASIC scalar address<br/>Reads: BASIC_VARTAB and embedded RA name<br/>Writes: RateOffset"]
     C --> D["Evaluate and store the learning rate<br/>Reads: BASIC argument stream and RateOffset<br/>Writes: RA"]
-    D --> E["Fall through to CreateBasicStorage<br/>Reads: control flow only<br/>Writes: none"]
+    D --> E["Fall through to CreateBasicStorage<br/>Data access: none"]
     E --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -297,7 +329,7 @@ Source: [CL.ML.s lines 259-270](../../combined/asm/CL.ML.s#L259)
 flowchart TD
     A(["InitializeClusterWeights entry<br/>Data access: none"]) --> B["Select cluster one<br/>Reads: OutputCount<br/>Writes: IndexI"]
     B --> C["Clear W1(0,0) as the random-weight sum accumulator<br/>Reads: none<br/>Writes: W1(0,0)"]
-    C --> D["Fall through to RandomWeight<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Fall through to RandomWeight<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -320,7 +352,7 @@ flowchart TD
     C -- Yes --> D["Generate a positive RND(1) weight<br/>Reads: BASIC RND state<br/>Writes: FAC"]
     D --> E["Store it in W1(cluster,input) and add it to W1(0,0)<br/>Reads: FAC, IndexI, IndexJ, W1(0,0)<br/>Writes: W1(IndexI,IndexJ) and W1(0,0)"]
     E --> C
-    C -- No --> F["Continue at NormalizeClusterWeights<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at NormalizeClusterWeights<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -343,7 +375,7 @@ flowchart TD
     C -- Yes --> D["Divide W1(cluster,input) by the sum<br/>Reads: W1(IndexI,IndexJ), W1(0,0)<br/>Writes: FAC"]
     D --> E["Store the normalized weight<br/>Reads: FAC, IndexI, IndexJ<br/>Writes: W1(IndexI,IndexJ)"]
     E --> C
-    C -- No --> F["Initialize another cluster or continue to FindOrderArray<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Initialize another cluster or continue to FindOrderArray<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -405,7 +437,7 @@ Source: [CL.ML.s lines 391-396](../../combined/asm/CL.ML.s#L391)
 flowchart TD
     A(["ClassifyPattern entry<br/>Data access: none"]) --> B["Clear retained winner state<br/>Reads: none<br/>Writes: Winner"]
     B --> C["Select cluster one<br/>Reads: OutputCount<br/>Writes: IndexI"]
-    C --> D["Fall through to ClusterActivation<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Fall through to ClusterActivation<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -428,7 +460,7 @@ flowchart TD
     C -- Yes --> D["Multiply W1(cluster,input) by IN(input,pattern)<br/>Reads: W1(IndexI,IndexJ) and IN(IndexJ,PatternIndex)<br/>Writes: FAC"]
     D --> E["Accumulate the product<br/>Reads: FAC and WorkFloat<br/>Writes: FAC"]
     E --> C
-    C -- No --> F["Continue at SelectWinner<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at SelectWinner<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -452,7 +484,7 @@ flowchart TD
     C -- Yes --> D{"Previous winner activation is strictly larger?<br/>Reads: O2(Winner) and WorkFloat<br/>Writes: none"}
     D -- Yes --> F["Keep the previous winner<br/>Reads: Winner and O2(Winner)<br/>Writes: FAC"]
     D -- No --> E
-    E --> G["Continue at StoreClusterOutput<br/>Reads: control flow only<br/>Writes: none"] --> Z(["Continue<br/>Data access: none"])
+    E --> G["Continue at StoreClusterOutput<br/>Data access: none"] --> Z(["Continue<br/>Data access: none"])
     F --> G
 ```
 
@@ -474,7 +506,7 @@ flowchart TD
     B --> C{"Current cluster is the retained winner?<br/>Reads: IndexI and Winner<br/>Writes: none"}
     C -- Yes --> D["Store its activation<br/>Reads: FAC and ElementPtr<br/>Writes: O2(IndexI)"]
     C -- No --> E["Store numeric zero<br/>Reads: ElementPtr and FloatZero<br/>Writes: O2(IndexI)"]
-    D --> F["Process another cluster or continue to MarkWinner<br/>Reads: control flow only<br/>Writes: none"] --> Z(["Continue<br/>Data access: none"])
+    D --> F["Process another cluster or continue to MarkWinner<br/>Data access: none"] --> Z(["Continue<br/>Data access: none"])
     E --> F
 ```
 
@@ -554,7 +586,7 @@ Source: [CL.ML.s lines 581-600](../../combined/asm/CL.ML.s#L581)
 flowchart TD
     A(["PrintFloatUnused entry<br/>Data access: none"]) --> B["Format FAC into the BASIC print buffer<br/>Reads: FAC<br/>Writes: BASIC_PRINT_BUFFER"]
     B --> C["Print the BASIC string<br/>Reads: BASIC_PRINT_BUFFER<br/>Writes: screen output"]
-    C --> D["Return; no internal routine calls this helper<br/>Reads: control flow only<br/>Writes: none"]
+    C --> D["Return; no internal routine calls this helper<br/>Data access: none"]
     D --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -579,7 +611,7 @@ flowchart TD
     C -- Yes --> D["Store the next sequential pattern number<br/>Reads: IndexI<br/>Writes: PAT(IndexI)"]
     D --> E["Advance the PAT index<br/>Reads: IndexI<br/>Writes: IndexI"]
     E --> C
-    C -- No --> F["Continue at ShufflePatterns<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at ShufflePatterns<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -603,7 +635,7 @@ flowchart TD
     D --> E["Swap PAT(i) and PAT(j)<br/>Reads: PAT(IndexI) and PAT(IndexJ)<br/>Writes: PAT(IndexI) and PAT(IndexJ)"]
     E --> F["Advance i<br/>Reads: IndexI<br/>Writes: IndexI"]
     F --> C
-    C -- No --> G["Continue at PresentShuffledPatterns<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> G["Continue at PresentShuffledPatterns<br/>Data access: none"]
     G --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -626,7 +658,7 @@ flowchart TD
     C -- Yes --> D["Set PatternIndex and call ClassifyPattern<br/>Reads: PAT(OrderIndex)<br/>Writes: PatternIndex, Winner, O2"]
     D --> E["Resolve the winning cluster's weights<br/>Reads: W1Offset and Winner<br/>Writes: ElementPtr"]
     E --> C
-    C -- No --> F["Continue at UpdateWinningCluster<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at UpdateWinningCluster<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -673,7 +705,7 @@ flowchart TD
     C -- Yes --> Z(["Return to BASIC<br/>Data access: none"])
     C -- No --> D["Run one TrainEpoch<br/>Reads: PAT, IN, W1, RA, PatternCount<br/>Writes: PAT, Winner, O2, W1"] --> E["Poll RUN/STOP<br/>Reads: KERNAL RUN/STOP state<br/>Writes: none"]
     E --> F{"RUN/STOP is pressed?<br/>Reads: KERNAL RUN/STOP state<br/>Writes: none"}
-    F -- Yes --> X["Transfer to BASIC break handling<br/>Reads: control flow only<br/>Writes: none"] --> Y(["Break exit<br/>Data access: none"])
+    F -- Yes --> X["Transfer to BASIC break handling<br/>Data access: none"] --> Y(["Break exit<br/>Data access: none"])
     F -- No --> G["Decrement using the preserved original counter logic<br/>Reads: TrialsRemaining<br/>Writes: TrialsRemaining"] --> C
 ```
 
@@ -696,7 +728,7 @@ flowchart TD
     A(["DefinePattern entry<br/>Data access: none"]) --> B["Parse the stored pattern number<br/>Reads: BASIC numeric argument and PatternCount<br/>Writes: PatternIndex"]
     B --> C{"Pattern number is in 1 through NP?<br/>Reads: parsed pattern number and PatternCount<br/>Writes: none"}
     C -- Yes --> D["Set PatternIndex and enter ReadInputString<br/>Reads: parsed pattern number<br/>Writes: PatternIndex"] --> Z(["Continue<br/>Data access: none"])
-    C -- No --> E["Raise BASIC illegal quantity error<br/>Reads: control flow only<br/>Writes: none"] --> X(["BASIC error<br/>Data access: none"])
+    C -- No --> E["Raise BASIC illegal quantity error<br/>Data access: none"] --> X(["BASIC error<br/>Data access: none"])
 ```
 
 ### `ReadInputString`
@@ -716,7 +748,7 @@ flowchart TD
     A(["ReadInputString entry<br/>Data access: none"]) --> B["Evaluate and require a string<br/>Reads: BASIC parser input<br/>Writes: BASIC string descriptor and data pointer"]
     B --> C{"String length equals P1?<br/>Reads: BASIC string descriptor and P1<br/>Writes: none"}
     C -- Yes --> D["Initialize input and active-count indices<br/>Reads: none<br/>Writes: IndexI and active-input counter"] --> E["Enter CountActiveInputs<br/>Data access: none"] --> Z(["Continue<br/>Data access: none"])
-    C -- No --> X["Raise BASIC illegal quantity error<br/>Reads: control flow only<br/>Writes: none"] --> Y(["BASIC error<br/>Data access: none"])
+    C -- No --> X["Raise BASIC illegal quantity error<br/>Data access: none"] --> Y(["BASIC error<br/>Data access: none"])
 ```
 
 ### `CountActiveInputs`
@@ -738,7 +770,7 @@ flowchart TD
     C -- Yes --> D["Convert ASCII 1 to numeric one and every other character to zero<br/>Reads: BASIC string data byte<br/>Writes: FAC"]
     D --> E["Store IN(input,PatternIndex) and increment the counter for ASCII 1<br/>Reads: FAC, PatternIndex, IndexI, ASCII byte<br/>Writes: IN(IndexI,PatternIndex) and active-input counter"]
     E --> C
-    C -- No --> F["Continue at StoreActiveCount<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Continue at StoreActiveCount<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -758,7 +790,7 @@ Source: [CL.ML.s lines 919-942](../../combined/asm/CL.ML.s#L919)
 flowchart TD
     A(["StoreActiveCount entry<br/>Data access: none"]) --> C{"Active-input count is nonzero?<br/>Reads: active-input counter<br/>Writes: none"}
     C -- Yes --> D["Store the count in IN(0,PatternIndex)<br/>Reads: active-input counter and PatternIndex<br/>Writes: IN(0,PatternIndex)"] --> Z(["Return<br/>Data access: none"])
-    C -- No --> X["Raise BASIC illegal quantity error<br/>Reads: control flow only<br/>Writes: none"] --> Y(["BASIC error<br/>Data access: none"])
+    C -- No --> X["Raise BASIC illegal quantity error<br/>Data access: none"] --> Y(["BASIC error<br/>Data access: none"])
 ```
 
 ## Persistence
@@ -780,8 +812,8 @@ flowchart TD
     A(["SaveNetwork entry<br/>Data access: none"]) --> B["Open the device-8 status channel<br/>Reads: FilenameBuffer and KERNAL device configuration<br/>Writes: KERNAL status channel 15"]
     B --> C["Parse the filename and append comma-W<br/>Reads: BASIC filename string<br/>Writes: FilenameBuffer"] --> D["Open logical file 1 for writing<br/>Reads: FilenameBuffer and KERNAL device configuration<br/>Writes: KERNAL file 1 output channel"]
     D --> E{"Drive status reports an error?<br/>Reads: drive status stream<br/>Writes: none"}
-    E -- No --> F["Continue at WriteNetworkBody<br/>Reads: control flow only<br/>Writes: none"] --> Z(["Continue<br/>Data access: none"])
-    E -- Yes --> X["Enter DiskError<br/>Reads: control flow only<br/>Writes: none"] --> Y(["Error exit<br/>Data access: none"])
+    E -- No --> F["Continue at WriteNetworkBody<br/>Data access: none"] --> Z(["Continue<br/>Data access: none"])
+    E -- Yes --> X["Enter DiskError<br/>Data access: none"] --> Y(["Error exit<br/>Data access: none"])
 ```
 
 ### `WriteNetworkBody`
@@ -802,7 +834,7 @@ flowchart TD
     B --> C["Write P1, P2, and NP bytes<br/>Reads: P1, P2, NP<br/>Writes: snapshot stream"]
     C --> D["Write the RA scalar<br/>Reads: RA and RateOffset<br/>Writes: snapshot stream"]
     D --> E["Write W1 and IN matrices<br/>Reads: W1, IN and matrix offsets<br/>Writes: snapshot stream"]
-    E --> F["Tail-call CloseNetworkFiles<br/>Reads: control flow only<br/>Writes: none"]
+    E --> F["Tail-call CloseNetworkFiles<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -825,7 +857,7 @@ flowchart TD
     C -- Yes --> D["Write the next stored floating-point byte<br/>Reads: BASIC scalar byte at BASIC_INDEX+IndexI<br/>Writes: snapshot stream"]
     D --> E["Advance the byte index<br/>Reads: IndexI<br/>Writes: IndexI"]
     E --> C
-    C -- No --> F["Return<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Return<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -848,7 +880,7 @@ flowchart TD
     C -- Yes --> D["Write the next byte through CHROUT<br/>Reads: matrix byte at BASIC_INDEX<br/>Writes: snapshot stream"]
     D --> E["Advance byte, element, and dimension counters<br/>Reads: IndexI, IndexJ, MatrixBound<br/>Writes: IndexI, IndexJ, BASIC_INDEX"]
     E --> C
-    C -- No --> F["Return<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Return<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -892,8 +924,8 @@ flowchart TD
     A(["LoadNetwork entry<br/>Data access: none"]) --> B["Open the device-8 status channel<br/>Reads: FilenameBuffer and KERNAL device configuration<br/>Writes: KERNAL status channel 15"]
     B --> C["Parse the filename and append comma-R<br/>Reads: BASIC filename string<br/>Writes: FilenameBuffer"] --> D["Open logical file 1 for reading<br/>Reads: FilenameBuffer and KERNAL device configuration<br/>Writes: KERNAL file 1 input channel"]
     D --> E{"Drive status reports an error?<br/>Reads: drive status stream<br/>Writes: none"}
-    E -- Yes --> X["Enter DiskError<br/>Reads: control flow only<br/>Writes: none"] --> Y(["Error exit<br/>Data access: none"])
-    E -- No --> F["Read P1, P2, and NP<br/>Reads: snapshot stream<br/>Writes: P1, P2, NP"] --> G["Recreate BASIC storage<br/>Reads: loaded P1, P2, NP and BASIC memory boundaries<br/>Writes: CL BASIC scalars, arrays, initialization state, and cached offsets"] --> H["Read RA, W1, and IN<br/>Reads: snapshot stream<br/>Writes: RA, W1, IN"] --> I["Tail-call CloseNetworkFiles<br/>Reads: control flow only<br/>Writes: none"] --> Z(["Close and return<br/>Data access: none"])
+    E -- Yes --> X["Enter DiskError<br/>Data access: none"] --> Y(["Error exit<br/>Data access: none"])
+    E -- No --> F["Read P1, P2, and NP<br/>Reads: snapshot stream<br/>Writes: P1, P2, NP"] --> G["Recreate BASIC storage<br/>Reads: loaded P1, P2, NP and BASIC memory boundaries<br/>Writes: CL BASIC scalars, arrays, initialization state, and cached offsets"] --> H["Read RA, W1, and IN<br/>Reads: snapshot stream<br/>Writes: RA, W1, IN"] --> I["Tail-call CloseNetworkFiles<br/>Data access: none"] --> Z(["Close and return<br/>Data access: none"])
 ```
 
 ### `ReadScalar`
@@ -915,7 +947,7 @@ flowchart TD
     C -- Yes --> D["Read the next byte through CHRIN<br/>Reads: snapshot stream<br/>Writes: input byte"]
     D --> E["Store it and advance the byte index<br/>Reads: IndexI<br/>Writes: IndexI"]
     E --> C
-    C -- No --> F["Return<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Return<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -938,7 +970,7 @@ flowchart TD
     C -- Yes --> D["Read and store the next byte<br/>Reads: snapshot stream and BASIC_INDEX<br/>Writes: matrix byte at BASIC_INDEX"]
     D --> E["Advance byte, element, and dimension counters<br/>Reads: IndexI, IndexJ, MatrixBound<br/>Writes: IndexI, IndexJ, BASIC_INDEX"]
     E --> C
-    C -- No --> F["Return<br/>Reads: control flow only<br/>Writes: none"]
+    C -- No --> F["Return<br/>Data access: none"]
     F --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -959,7 +991,7 @@ flowchart TD
     A(["RecreateForLoad entry<br/>Data access: none"]) --> B["Reset BASIC array and string boundaries<br/>Reads: BASIC_STREND and BASIC_MEMSIZ<br/>Writes: BASIC_STREND and BASIC_FRETOP"]
     B --> C["Recreate dimension scalars from the loaded byte values<br/>Reads: P1, P2, NP loaded bytes<br/>Writes: P1, P2, NP BASIC scalars"]
     C --> D["Call CreateBasicStorage to DIM arrays and rebuild offsets<br/>Reads: P1, P2, NP<br/>Writes: CL BASIC arrays and cached offsets"]
-    D --> E["Return<br/>Reads: control flow only<br/>Writes: none"]
+    D --> E["Return<br/>Data access: none"]
     E --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -980,7 +1012,7 @@ flowchart TD
     A(["OpenStatusChannel entry<br/>Data access: none"]) --> B["Set an empty filename<br/>Reads: none<br/>Writes: FilenameBuffer length"]
     B --> C["Configure logical file 15, device 8, secondary address 15<br/>Reads: device and secondary-address constants<br/>Writes: KERNAL logical-file configuration"]
     C --> D["Open the drive status channel<br/>Reads: KERNAL logical-file configuration<br/>Writes: KERNAL status channel 15"]
-    D --> E["Return<br/>Reads: control flow only<br/>Writes: none"]
+    D --> E["Return<br/>Data access: none"]
     E --> Z(["Exit or continue<br/>Data access: none"])
 ```
 
@@ -1001,7 +1033,7 @@ flowchart TD
     A(["CloseNetworkFiles entry<br/>Data access: none"]) --> B["Restore default I/O channels<br/>Reads: KERNAL channel state<br/>Writes: default KERNAL channels"]
     B --> C["Close logical file 1<br/>Reads: KERNAL file table<br/>Writes: closed logical file 1"]
     C --> D["Close status file 15<br/>Reads: KERNAL file table<br/>Writes: closed logical file 15"]
-    D --> E["Return<br/>Reads: control flow only<br/>Writes: none"]
+    D --> E["Return<br/>Data access: none"]
     E --> Z(["Exit or continue<br/>Data access: none"])
 ```
 

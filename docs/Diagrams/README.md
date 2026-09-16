@@ -4,6 +4,7 @@ The combined ca65 reconstructions contain 93 semantic code labels. Each label ha
 
 - [BP.ML activity diagrams](BP-ML-Activity-Diagrams.md): 50 public vectors, initialization phases, inference helpers, backpropagation phases, pattern parsers, and persistence routines.
 - [CL.ML activity diagrams](CL-ML-Activity-Diagrams.md): 43 public vectors, compatibility stubs, initialization phases, classification helpers, competitive-learning phases, pattern parsers, and persistence routines.
+- [BP.ML and CL.ML data structures](../ML-DATA-STRUCTURES.md): exact BASIC model layouts, fixed RAM workspace maps, serialized file formats, and embedded read-only tables.
 
 ## Source hierarchy
 
