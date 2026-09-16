@@ -1,0 +1,12 @@
+Verified 2026-09-16. Reproduce with Verify-Archive.ps1.
+XOR D64 extraction: identical
+ENCODE D64 extraction: identical
+DIPOLE D64 extraction: identical
+BP.ML D64 extraction: identical
+CL.ML D64 extraction: identical
+XOR BASIC pointers, original lines and source round trip: verified
+ENCODE BASIC pointers, original lines and source round trip: verified
+DIPOLE BASIC pointers, original lines and source round trip: verified
+Original BASIC lines preserved: 131; additional REM lines: 36
+BASIC-Checks.csv: 131 matching recorded checksums
+MLX-Checks.csv: 818 matching recorded checksums

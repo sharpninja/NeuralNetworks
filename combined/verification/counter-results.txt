@@ -1,0 +1,12 @@
+requested=0 epochs=0 observed
+requested=1 epochs=1 observed
+requested=2 epochs=2 observed
+requested=255 epochs=255 observed
+requested=256 epochs=256 observed
+requested=257 epochs=1 observed
+requested=400 epochs=144 observed
+requested=511 epochs=255 observed
+requested=512 epochs=512 observed
+requested=513 epochs=257 observed
+requested=1000 epochs=744 observed
+requested=32767 epochs=32511 observed

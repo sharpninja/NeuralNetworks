@@ -1,0 +1,6 @@
+Verified 2026-09-16 with MuPDF.
+Pages: 15; all 15 contain searchable text.
+Bookmarks: 4; targets: pages 1, 4, 10, 15.
+Original article pages 1-14: rendered PNG bytes and extracted OCR text exactly equal to the unmodified GPT source PDF.
+Appended errata page: rendered and visually reviewed; no clipping or overlap found.
+Includes confirmed CL.ML trial-counter defect, original-disk tail omissions, and OCR/color-notation guidance.
